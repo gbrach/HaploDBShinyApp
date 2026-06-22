@@ -15,6 +15,28 @@ create_db_conn <- function(path) {
   conn
 }
 
+#' Seed a live database file from its bundled sample on first run
+#'
+#' The live DB (e.g. data/haploDB/haplodb.sqlite) is gitignored so real lab data
+#' is never committed. A fresh checkout therefore ships only the committed sample
+#' (haplodb.sample.sqlite). Copy that into place once, so the app runs
+#' out-of-the-box with demo data and never overwrites an existing live DB.
+#'
+#' The sample path is derived from the live path by inserting ".sample" before
+#' the ".sqlite" extension, so it tracks wherever main_path is configured.
+#'
+#' @param path Path to the live SQLite file (from config)
+#' @return Invisibly TRUE if a copy was made, FALSE otherwise
+seed_db_from_sample <- function(path) {
+  if (file.exists(path)) return(invisible(FALSE))
+  sample_path <- sub("\\.sqlite$", ".sample.sqlite", path)
+  if (!file.exists(sample_path)) return(invisible(FALSE))
+  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+  file.copy(sample_path, path)
+  message(sprintf("Seeded %s from %s (first run)", path, sample_path))
+  invisible(TRUE)
+}
+
 #' Ensure all pending tables exist in SQLite
 #'
 #' Creates pending_yjs, pending_strains, and deferred tables.

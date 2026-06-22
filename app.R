@@ -14,6 +14,9 @@ library(ggtree)
 app_config <- config::get(file = "config.yml")
 
 # Database connections
+# On a fresh checkout the live DB is absent (it's gitignored so real data is never
+# committed); seed it once from the committed sample so the app runs out-of-the-box.
+seed_db_from_sample(app_config$database$main_path)
 main_conn <- create_db_conn(app_config$database$main_path)
 pending_conn <- create_db_conn(app_config$database$pending_path)
 users_conn <- create_db_conn(app_config$database$users_path)
@@ -71,8 +74,21 @@ ui <- fluidPage(
         }
         swapLogos();
 
-        new MutationObserver(function() { swapLogos(); })
+        // Tell the embedded Searcherer map (Freezer map tab) to match our theme, live. It applies
+        // it without reloading the iframe. See Searcherer components/ThemeSync.tsx + INTEGRATION.md.
+        function syncSearchererTheme() {
+          var theme = document.documentElement.getAttribute('data-bs-theme') || 'light';
+          document.querySelectorAll('iframe').forEach(function(f) {
+            try { f.contentWindow.postMessage({ type: 'sr-theme', theme: theme }, window.location.origin); } catch (e) {}
+          });
+        }
+
+        new MutationObserver(function() { swapLogos(); syncSearchererTheme(); })
           .observe(document.documentElement, { attributes: true, attributeFilter: ['data-bs-theme'] });
+        // Also push the current theme once the map iframe finishes loading (covers tab-switch-in).
+        document.addEventListener('load', function(e) {
+          if (e.target && e.target.tagName === 'IFRAME') syncSearchererTheme();
+        }, true);
       })();
 
       $(document).on('shiny:connected', function() {
@@ -175,6 +191,31 @@ server <- function(input, output, session) {
     if (isTRUE(creds$logged_in)) creds$info else NULL
   })
 
+  # Searcherer freezer map, served same-origin under /searcherer (see Searcherer INTEGRATION.md).
+  # Mint a short-lived SSO token (so haplodb's login carries over) and pass the current theme, so
+  # the embedded map matches haplodb's dark/light mode. Re-renders when the dark toggle flips.
+  output$searcherer_frame <- renderUI({
+    u <- user_info()
+    if (is.null(u)) return(NULL)
+    theme <- if (isTRUE(input$dark_mode == "dark")) "dark" else "light"
+    secret <- Sys.getenv("SSO_SHARED_SECRET")
+    callback <- sprintf("/map?embed=1&theme=%s", theme)
+    src <- if (nzchar(secret)) {
+      claim <- jose::jwt_claim(
+        sub = u$username, iss = "haplodb", aud = "searcherer",
+        exp = as.numeric(Sys.time()) + 120
+      )
+      token <- jose::jwt_encode_hmac(claim, secret = secret)  # HS256
+      sprintf("/searcherer/sso?token=%s&callbackUrl=%s",
+              utils::URLencode(token, reserved = TRUE),
+              utils::URLencode(callback, reserved = TRUE))
+    } else {
+      # No SSO secret set → fall back to the same-credentials login inside the frame.
+      sprintf("/searcherer%s", callback)
+    }
+    tags$iframe(src = src, style = "width:100%; height:calc(100vh - 120px); border:none;")
+  })
+
   # Render the full page based on auth state
   output$main_ui <- renderUI({
     logged_in <- isTRUE(credentials()$logged_in)
@@ -233,7 +274,10 @@ server <- function(input, output, session) {
         nav_panel("Tree Plot", value = "tree", icon = icon("tree"),
                   tree_ui("tree")),
         nav_panel("Name Conversion", value = "nameconv", icon = icon("exchange-alt"),
-                  nameconv_ui("nameconv"))
+                  nameconv_ui("nameconv")),
+        # Searcherer freezer map, embedded as a native haplodb page (see Searcherer INTEGRATION.md).
+        nav_panel("Freezer map", value = "freezer_map", icon = icon("snowflake"),
+                  uiOutput("searcherer_frame"))
       ))
 
       if (admin) {
